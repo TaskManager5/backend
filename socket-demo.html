@@ -1,0 +1,10 @@
+<!doctype html><meta charset="utf-8">
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+  const s = io("http://localhost:3000");
+  s.on("connect", ()=>console.log("socket connected"));
+  s.on("task.created", t=>console.log("task.created", t));
+  s.on("task.updated", t=>console.log("task.updated", t));
+  s.on("task.deleted", t=>console.log("task.deleted", t));
+</script>
+Открой консоль DevTools.

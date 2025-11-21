@@ -49,7 +49,7 @@ INSERT INTO teams (name) VALUES
     ('QA Team')
 ON CONFLICT DO NOTHING;
 
--- 7. Добавляем пользователей в команды (пример)
+-- 7. Добавляем пользователей в команды
 INSERT INTO team_members (team_id, user_id, role_in_team) VALUES
     -- Frontend Team
     (1, (SELECT id FROM users WHERE login = 'alex'), 'manager'),

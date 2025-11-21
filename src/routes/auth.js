@@ -8,7 +8,6 @@ export const router = Router();
 
 router.post('/login',
   validate.body(z.object({ login: z.string(), password: z.string() })),
-  // --- ИСПРАВЛЕНО: Добавлены try...catch и next ---
   async (req, res, next) => {
     try {
       const { rows:[u] } = await db.query('SELECT * FROM users WHERE login=$1', [req.body.login]);
@@ -27,7 +26,6 @@ router.post('/login',
 
 router.post('/refresh',
   validate.body(z.object({ refresh: z.string() })),
-  // --- ИСПРАВЛЕНО: Добавлены try...catch и next ---
   async (req, res, next) => {
     try {
       let payload;
@@ -53,7 +51,6 @@ router.post('/refresh',
 
 router.post('/logout',
   validate.body(z.object({ jti: z.string().uuid() })),
-  // --- ИСПРАВЛЕНО: Добавлены try...catch и next ---
   async (req, res, next) => {
     try {
       await revokeRefresh(req.body.jti);

@@ -42,7 +42,7 @@ SELECT
     (SELECT id FROM users WHERE login = 'admin'), 
     s.id 
 FROM skills s
-WHERE s.name IN ('Планирование', 'Аналитика') -- "Управление" не было в списке выше, можно добавить если нужно
+WHERE s.name IN ('Планирование', 'Аналитика')
 ON CONFLICT (user_id, skill_id) DO NOTHING;
 
 -- 3.2. 'manager' (Ольга С.)

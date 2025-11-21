@@ -1,18 +1,18 @@
 import { Router } from 'express';
 import { pool } from '../services/db.js'; 
-// ИСПРАВЛЕНИЕ: Импортируем verifyAccess
+// Импортируем verifyAccess
 import { verifyAccess, requireRole } from '../middleware/auth.js';
 import { z } from 'zod';
 import { validate } from '../middleware/validate.js';
 
 const router = Router();
-// ИСПРАВЛЕНИЕ: Применяем middleware аутентификации ко всем маршрутам /users
+//  Применяем middleware аутентификации ко всем маршрутам /users
 router.use(verifyAccess);
 
-// --- GET /users (Для списка сотрудников и модального окна) ---
+// GET /users (Для списка сотрудников и модального окна) 
 router.get('/', async (req, res, next) => {
   try {
-    // ИЗМЕНЕНИЕ: Полностью новый запрос
+    // Полностью новый запрос
     // Мы используем LEFT JOIN и агрегацию json_agg для сбора всех навыков
     // в структурированный JSON-массив
     const result = await pool.query(
@@ -47,9 +47,9 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// --- POST /users (Для добавления нового сотрудника) ---
-router.post('/', requireRole('admin'), async (req, res, next) => { // Добавлен requireRole
-  // ИЗМЕНЕНИЕ: Мы ожидаем 'skill_ids' (массив ID) вместо 'skills' (строка)
+// POST /users (Для добавления нового сотрудника) 
+router.post('/', requireRole('admin'), async (req, res, next) => { 
+  // Мы ожидаем 'skill_ids' (массив ID) вместо 'skills' (строка)
   const { name, login, password, position, role, skill_ids } = req.body;
 
   // Простая проверка на сервере
@@ -115,7 +115,7 @@ router.post('/', requireRole('admin'), async (req, res, next) => { // Добав
   }
 });
 
-// --- НОВЫЙ МАРШРУТ: DELETE /users/:id ---
+// DELETE /users/:id 
 router.delete('/:id',
   requireRole('admin'), // Только админ может удалять
   validate.params(z.object({ id: z.coerce.number().int().positive() })),
@@ -143,11 +143,7 @@ router.delete('/:id',
         // 2. Удаляем связи навыков
         await client.query('DELETE FROM user_skills WHERE user_id = $1', [userId]);
         
-        // 3. Удаляем задачи (как и просили)
-        // (Это удалит и те, что он создал, и те, что ему назначены)
-        // ИСПРАВЛЕНИЕ: Используем 'ON DELETE SET NULL' для created_by и 'ON DELETE CASCADE' для assignee_id
-        // Но для простоты (как вы просили) - удаляем
-        
+        // 3. Удаляем задачи 
         // Сначала удаляем те, где он исполнитель
         await client.query('DELETE FROM tasks WHERE assignee_id = $1', [userId]);
         // Затем удаляем те, где он создатель
@@ -162,7 +158,7 @@ router.delete('/:id',
         }
         
         await client.query('COMMIT');
-        res.status(204).end(); // Успешно удалено
+        res.status(204).end(); 
         
     } catch (err) {
         await client.query('ROLLBACK');

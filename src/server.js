@@ -11,7 +11,7 @@ import { env, CORS_WHITELIST } from './config/env.js';
 import { requestId, notFound, errorHandler } from './utils/errors.js';
 import { openapi } from './docs/openapi.js';
 
-// --- ИМПОРТЫ МАРШРУТОВ ---
+// ИМПОРТЫ МАРШРУТОВ
 import { router as users } from './routes/users.js';
 import { router as auth } from './routes/auth.js';
 import { router as teams } from './routes/teams.js';
@@ -43,7 +43,7 @@ app.use(helmet({
   }
 }));
 app.use(express.json());
-app.use('/users', users); // <-- ОСТАВЛЯЕМ (мы его изменим в Шаге 4)
+app.use('/users', users); 
 app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(requestId);
 

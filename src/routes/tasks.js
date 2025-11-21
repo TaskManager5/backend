@@ -21,7 +21,7 @@ const PostTask = z.object({
 });
 const PatchTask = PostTask.partial();
 
-// RBAC WHERE с базовым индексом (УПРОЩЕННО, БЕЗ CAST)
+// RBAC WHERE с базовым индексом 
 function whereByRole(user, base = 1){
   // Администратор видит всё
   if (user.role === 'admin') return { sql:'TRUE', params:[] };
@@ -31,7 +31,7 @@ function whereByRole(user, base = 1){
   return { sql:`t.assignee_id = $${base} OR t.created_by = $${base}`, params:[user.sub] };
 }
 
-// LIST (ФИНАЛЬНАЯ ВЕРСИЯ: Фильтрация по роли и имя исполнителя)
+// LIST ( Фильтрация по роли и имя исполнителя)
 router.get('/', async (req,res)=>{
   const q = req.query || {};
   const limit  = Math.min(Math.max(parseInt(q.limit ?? '50', 10) || 50, 1), 200);
@@ -41,7 +41,7 @@ router.get('/', async (req,res)=>{
   const wRole = whereByRole(req.user, 1);
   const p = [];
 
-  // *** КРИТИЧНОЕ ИСПРАВЛЕНИЕ #1: Преобразуем ID в число перед запросом ***
+  // Преобразуем ID в число перед запросом 
   if (wRole.params.length > 0) {
     wRole.params[0] = parseInt(wRole.params[0], 10);
   }
@@ -83,7 +83,7 @@ router.get('/', async (req,res)=>{
   res.json(rows);
 });
 
-// CREATE (ФИНАЛЬНАЯ ВЕРСИЯ: Возврат имени исполнителя)
+// CREATE ( Возврат имени исполнителя)
 router.post('/', async (req,res)=>{
   const parsed = PostTask.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error:'bad_request' });
@@ -105,7 +105,7 @@ router.post('/', async (req,res)=>{
       `INSERT INTO tasks(title,description,deadline,priority,importance,complexity,
                           assignee_id,team_id,status,created_by)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-        RETURNING *, (SELECT name FROM users WHERE id = $7) AS assignee_name`, // <--- ДОБАВЛЕН ВОЗВРАТ ИМЕНИ
+        RETURNING *, (SELECT name FROM users WHERE id = $7) AS assignee_name`, 
         p);
     req.app.get('io')?.emit('task.created', t);
     res.status(201).json(t);
@@ -115,7 +115,7 @@ router.post('/', async (req,res)=>{
   }
 });
 
-// UPDATE (без изменений)
+// UPDATE 
 router.patch('/:id', async (req,res)=>{
   const idParsed = Id.safeParse(req.params.id);
   if (!idParsed.success) return res.status(400).json({ error:'bad_request' });
@@ -136,7 +136,7 @@ router.patch('/:id', async (req,res)=>{
   const idIdx = p.length + 1;
   const w = whereByRole(req.user, idIdx + 1);
 
-  // *** КРИТИЧНОЕ ИСПРАВЛЕНИЕ #2: Преобразуем ID в число перед запросом (для PATCH) ***
+  // Преобразуем ID в число перед запросом (для PATCH) 
   if (w.params.length > 0) {
     w.params[0] = parseInt(w.params[0], 10);
   }
@@ -159,14 +159,14 @@ router.patch('/:id', async (req,res)=>{
   }
 });
 
-// DELETE (без изменений)
+// DELETE 
 router.delete('/:id', async (req,res)=>{
   const idParsed = Id.safeParse(req.params.id);
   if (!idParsed.success) return res.status(400).json({ error:'bad_request' });
 
   const w = whereByRole(req.user, 2);
 
-  // *** КРИТИЧНОЕ ИСПРАВЛЕНИЕ #3: Преобразуем ID в число перед запросом (для DELETE) ***
+  // Преобразуем ID в число перед запросом (для DELETE) 
   if (w.params.length > 0) {
     w.params[0] = parseInt(w.params[0], 10);
   }

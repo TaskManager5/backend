@@ -39,7 +39,7 @@ router.get('/', async (req, res, next) => {
   }
 });
 
-// --- Маршруты только для Админа ---
+// Маршруты только для Админа 
 
 // POST /skills/categories (Создать новую категорию)
 router.post('/categories', 

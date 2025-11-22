@@ -174,5 +174,89 @@ router.delete('/:id',
   }
 );
 
+// PATCH /users/:id (Редактирование сотрудника/профиля)
+router.patch('/:id',
+  // Проверка прав: либо админ, либо сам пользователь редактирует себя
+  async (req, res, next) => {
+      const targetId = parseInt(req.params.id);
+      if (req.user.role !== 'admin' && req.user.sub !== targetId) {
+          return res.status(403).json({ error: 'forbidden' });
+      }
+      next();
+  },
+  validate.body(z.object({
+    name: z.string().min(1).optional(),
+    login: z.string().min(1).optional(),
+    password: z.string().min(8).optional(), // Пароль опционален
+    position: z.string().optional(),
+    skill_ids: z.array(z.number()).optional()
+  })),
+  async (req, res, next) => {
+    const userId = parseInt(req.params.id);
+    const { name, login, password, position, skill_ids } = req.body;
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Обновляем основные поля (динамическое формирование запроса)
+      const updates = [];
+      const values = [];
+      let idx = 1;
+
+      if (name) { updates.push(`name=$${idx++}`); values.push(name); }
+      if (login) { updates.push(`login=$${idx++}`); values.push(login); }
+      if (position) { updates.push(`position=$${idx++}`); values.push(position); }
+      if (password) { 
+          updates.push(`password_hash=crypt($${idx++}, gen_salt('bf', 12))`); 
+          values.push(password); 
+      }
+
+      if (updates.length > 0) {
+          // Проверка уникальности логина, если он меняется
+          if (login) {
+              const check = await client.query('SELECT 1 FROM users WHERE login = $1 AND id != $2', [login, userId]);
+              if (check.rowCount > 0) {
+                  throw { code: 'LOGIN_EXISTS' };
+              }
+          }
+          
+          await client.query(
+              `UPDATE users SET ${updates.join(', ')} WHERE id = $${idx}`,
+              [...values, userId]
+          );
+      }
+
+      // 2. Обновляем навыки (если переданы) - полная перезапись
+      if (skill_ids) {
+          await client.query('DELETE FROM user_skills WHERE user_id = $1', [userId]);
+          
+          if (skill_ids.length > 0) {
+              const skillValues = skill_ids.map((sid, i) => `($1, $${i + 2})`).join(', ');
+              await client.query(
+                  `INSERT INTO user_skills (user_id, skill_id) VALUES ${skillValues}`,
+                  [userId, ...skill_ids]
+              );
+          }
+      }
+
+      await client.query('COMMIT');
+      
+      // Возвращаем обновленные данные
+      const { rows: [updatedUser] } = await client.query('SELECT id, name, login, position, role FROM users WHERE id = $1', [userId]);
+      res.json(updatedUser);
+
+    } catch (err) {
+      await client.query('ROLLBACK');
+      if (err.code === 'LOGIN_EXISTS') {
+          return res.status(409).json({ error: 'Этот логин уже занят' });
+      }
+      console.error('Update user error:', err);
+      next(err);
+    } finally {
+      client.release();
+    }
+  }
+);
 
 export { router };

@@ -13,8 +13,8 @@ const PostTask = z.object({
   description: z.string().default(''),
   deadline: z.coerce.date(),
   priority: z.enum(['low','medium','high']),
-  importance: z.number().int().min(1).max(10),
-  complexity: z.number().int().min(1).max(10),
+  importance: z.number().int().min(1).max(5),
+  complexity: z.number().int().min(1).max(5),
   assigneeId: z.number().int().positive().nullable().optional(),
   teamId: z.number().int().positive().nullable().optional(),
   status: z.enum(['new','in_progress','done','canceled']).default('new')
@@ -61,8 +61,8 @@ router.get('/', async (req,res)=>{
   if (q.assigneeId){ p.push(Number(q.assigneeId)); cond.push(`t.assignee_id=$${currentParamIndex++}`); }
   if (q.teamId){ p.push(Number(q.teamId)); cond.push(`t.team_id=$${currentParamIndex++}`); }
   if (String(q.urgent).toLowerCase()==='true'){ cond.push(`t.deadline <= now() + interval '2 days'`); }
-  if (String(q.important).toLowerCase()==='true'){ cond.push(`t.importance >= 8`); }
-  if (String(q.hard).toLowerCase()==='true'){ cond.push(`t.complexity >= 8`); }
+  if (String(q.important).toLowerCase()==='true'){ cond.push(`t.importance >= 4`); }
+  if (String(q.hard).toLowerCase()==='true'){ cond.push(`t.complexity >= 4`); }
   if (q.q){
     p.push(`%${q.q}%`, `%${q.q}%`);
     cond.push(`(t.title ILIKE $${currentParamIndex++} OR t.description ILIKE $${currentParamIndex++})`);

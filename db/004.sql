@@ -4,7 +4,7 @@ DECLARE
   important boolean;
 BEGIN
   urgent := NEW.deadline <= now() + interval '2 days';
-  important := NEW.importance >= 7;
+  important := NEW.importance >= 4;
 
   NEW.quadrant := CASE
     WHEN important AND urgent THEN 1

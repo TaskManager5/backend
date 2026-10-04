@@ -17,6 +17,7 @@ const PostTask = z.object({
   complexity: z.number().int().min(1).max(5),
   assigneeId: z.number().int().positive().nullable().optional(),
   teamId: z.number().int().positive().nullable().optional(),
+  parentTaskId: z.number().int().positive().nullable().optional(),
   status: z.enum(['new','in_progress','done','canceled']).default('new')
 });
 const PatchTask = PostTask.partial();
@@ -97,14 +98,15 @@ router.post('/', async (req,res)=>{
     body.title, body.description, body.deadline,
     body.priority, body.importance, body.complexity,
     body.assigneeId ?? null, body.teamId ?? null,
+    body.parentTaskId ?? null,
     body.status, req.user.sub
   ];
 
   try{
     const { rows:[t] } = await db.query(
       `INSERT INTO tasks(title,description,deadline,priority,importance,complexity,
-                          assignee_id,team_id,status,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+                        assignee_id,team_id,parent_task_id,status,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
         RETURNING *, (SELECT name FROM users WHERE id = $7) AS assignee_name`, 
         p);
     req.app.get('io')?.emit('task.created', t);
@@ -122,11 +124,25 @@ router.patch('/:id', async (req,res)=>{
 
   const bodyParsed = PatchTask.safeParse(req.body);
   if (!bodyParsed.success) return res.status(400).json({ error:'bad_request' });
+  // Защита от циклов: parentTaskId не может быть самой задачей
+  if (bodyParsed.data.parentTaskId === idParsed.data) {
+    return res.status(422).json({ error: 'task_cannot_be_parent_of_itself' });
+  }
+  // Защита от прямого цикла (A — подзадача B, а B — подзадача A)
+  if (bodyParsed.data.parentTaskId) {
+    const { rows:[parent] } = await db.query(
+      'SELECT parent_task_id FROM tasks WHERE id = $1',
+      [bodyParsed.data.parentTaskId]
+    );
+    if (parent && parent.parent_task_id === idParsed.data) {
+      return res.status(422).json({ error: 'circular_dependency' });
+    }
+  }
 
   const updates = [];
   const p = [];
   for (const [k,v] of Object.entries(bodyParsed.data)){
-    const map = { assigneeId:'assignee_id', teamId:'team_id' };
+    const map = { assigneeId:'assignee_id', teamId:'team_id', parentTaskId:'parent_task_id' };
     const col = map[k] || k;
     updates.push(`${col} = $${p.length+1}`);
     p.push(v);

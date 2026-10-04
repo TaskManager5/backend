@@ -43,7 +43,7 @@ app.use(helmet({
   }
 }));
 app.use(express.json());
-app.use('/users', users); 
+app.use('/api/users', users); 
 app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(requestId);
 
@@ -51,18 +51,18 @@ const rlAuthLogin   = rateLimit({ windowMs: 15*60*1000, max: 20, standardHeaders
 const rlAuthRefresh = rateLimit({ windowMs: 10*60*1000, max: 60, standardHeaders: true });
 const rlGlobal      = rateLimit({ windowMs: 60*1000, max: 300, standardHeaders: true });
 
-app.use('/auth/login', rlAuthLogin);
-app.use('/auth/refresh', rlAuthRefresh);
+app.use('/api/auth/login', rlAuthLogin);
+app.use('/api/auth/refresh', rlAuthRefresh);
 app.use(rlGlobal);
 
-app.use('/auth', auth);
-app.use('/teams', teams);
-app.use('/tasks', tasks);
-app.use('/analytics', analytics);
+app.use('/api/auth', auth);
+app.use('/api/teams', teams);
+app.use('/api/tasks', tasks);
+app.use('/api/analytics', analytics);
 // 2. РЕГИСТРИРУЕМ НОВЫЙ МАРШРУТ
-app.use('/skills', skills);
+app.use('/api/skills', skills);
 
-app.use('/docs', swaggerUi.serve, swaggerUi.setup(openapi));
+app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(openapi));
 
 app.get('/healthz', (req,res)=>res.json({ ok:true }));
 

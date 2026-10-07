@@ -34,8 +34,9 @@ router.get('/', async (req, res, next) => {
           '[]'
         ) AS skills
       FROM users u
-      LEFT JOIN user_skills us ON u.id = us.user_id
-      LEFT JOIN skills s ON us.skill_id = s.id
+      LEFT JOIN workers w ON w.user_id = u.id
+      LEFT JOIN worker_skills ws ON ws.worker_id = w.id
+      LEFT JOIN skills s ON ws.skill_id = s.id
       LEFT JOIN skill_categories c ON s.category_id = c.id
       GROUP BY u.id
       ORDER BY u.name;`
@@ -73,23 +74,31 @@ router.post('/', requireRole('admin'), async (req, res, next) => {
       `INSERT INTO users (name, login, password_hash, position, role)
        VALUES ($1, $2, crypt($3, gen_salt('bf', 12)), $4, $5)
        RETURNING id, name, position, role, login`,
-      // Мы убрали 'skills' из этого запроса
       [name, login, password, position, role || 'user'] 
     );
     
     const newUser = userResult.rows[0];
 
-    // 3. Добавляем навыки в 'user_skills', если они были переданы
+    // 2.1 Создаём worker, связанный с пользователем
+    const workerResult = await client.query(
+      `INSERT INTO workers (user_id, name, position)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [newUser.id, name, position]
+    );
+    
+    const newWorker = workerResult.rows[0];
+
+    // 3. Добавляем навыки в 'worker_skills' (не в user_skills!)
     if (skill_ids && Array.isArray(skill_ids) && skill_ids.length > 0) {
-      // Готовим запрос для множественной вставки
       const skillValues = skill_ids.map((skillId, index) => 
-        `($1, $${index + 2})` // $1 будет user_id, $2+ будут skillId
+        `($1, $${index + 2})`
       ).join(', ');
       
-      const skillParams = [newUser.id, ...skill_ids];
+      const skillParams = [newWorker.id, ...skill_ids];
       
       await client.query(
-        `INSERT INTO user_skills (user_id, skill_id) VALUES ${skillValues}`,
+        `INSERT INTO worker_skills (worker_id, skill_id) VALUES ${skillValues}`,
         skillParams
       );
     }
@@ -137,19 +146,17 @@ router.delete('/:id',
     try {
         await client.query('BEGIN');
         
-        // 1. Удаляем связи из 'team_members'
-        await client.query('DELETE FROM team_members WHERE user_id = $1', [userId]);
-        
-        // 2. Удаляем связи навыков
-        await client.query('DELETE FROM user_skills WHERE user_id = $1', [userId]);
-        
-        // 3. Удаляем задачи 
-        // Сначала удаляем те, где он исполнитель
-        await client.query('DELETE FROM tasks WHERE assignee_id = $1', [userId]);
-        // Затем удаляем те, где он создатель
-        await client.query('DELETE FROM tasks WHERE created_by = $1', [userId]);
-        
-        // 4. Удаляем самого пользователя
+        // 1. Удаляем связи из team_members
+        await client.query("DELETE FROM team_members WHERE user_id = $1", [userId]);
+
+        // 2. Удаляем задачи
+        await client.query("DELETE FROM tasks WHERE assignee_id = $1", [userId]);
+        await client.query("DELETE FROM tasks WHERE assignee_worker_id = (SELECT id FROM workers WHERE user_id = $1)", [userId]);
+        await client.query("DELETE FROM tasks WHERE created_by = $1", [userId]);
+
+        // 3. Удаляем worker (CASCADE удалит worker_skills)
+        await client.query("DELETE FROM workers WHERE user_id = $1", [userId]);
+
         const { rowCount } = await client.query('DELETE FROM users WHERE id = $1', [userId]);
         
         if (rowCount === 0) {
@@ -227,16 +234,28 @@ router.patch('/:id',
           );
       }
 
-      // 2. Обновляем навыки (если переданы) - полная перезапись
+
+      // 2. Обновляем worker (name, position)
+      if (name !== undefined || position !== undefined) {
+          const workerUpdates = [];
+          const workerParams = [];
+          if (name !== undefined) { workerUpdates.push(`name = $${workerParams.length + 1}`); workerParams.push(name); }
+          if (position !== undefined) { workerUpdates.push(`position = $${workerParams.length + 1}`); workerParams.push(position); }
+          if (workerUpdates.length > 0) {
+              workerUpdates.push("updated_at = now()");
+              workerParams.push(userId);
+              await client.query(`UPDATE workers SET ${workerUpdates.join(", ")} WHERE user_id = $${workerParams.length}`, workerParams);
+          }
+      }
+
+      // 2.1 Обновляем навыки — в worker_skills
       if (skill_ids) {
-          await client.query('DELETE FROM user_skills WHERE user_id = $1', [userId]);
-          
+          const { rows: [worker] } = await client.query("SELECT id FROM workers WHERE user_id = $1", [userId]);
+          if (!worker) throw { code: "WORKER_NOT_FOUND" };
+          await client.query("DELETE FROM worker_skills WHERE worker_id = $1", [worker.id]);
           if (skill_ids.length > 0) {
-              const skillValues = skill_ids.map((sid, i) => `($1, $${i + 2})`).join(', ');
-              await client.query(
-                  `INSERT INTO user_skills (user_id, skill_id) VALUES ${skillValues}`,
-                  [userId, ...skill_ids]
-              );
+              const skillValues = skill_ids.map((sid, i) => `($1, $${i + 2})`).join(", ");
+              await client.query(`INSERT INTO worker_skills (worker_id, skill_id) VALUES ${skillValues}`, [worker.id, ...skill_ids]);
           }
       }
 

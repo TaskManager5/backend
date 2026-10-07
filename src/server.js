@@ -19,6 +19,7 @@ import { router as tasks } from './routes/tasks.js';
 import { router as analytics } from './routes/analytics.js';
 // 1. ИМПОРТИРУЕМ НОВЫЙ МАРШРУТ
 import { router as skills } from './routes/skills.js'; 
+import { router as workers } from './routes/workers.js';
 
 const app = express();
 
@@ -43,7 +44,8 @@ app.use(helmet({
   }
 }));
 app.use(express.json());
-app.use('/api/users', users); 
+app.use('/api/users', users);
+app.use('/api/workers', workers); 
 app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(requestId);
 

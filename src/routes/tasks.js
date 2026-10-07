@@ -29,7 +29,7 @@ function whereByRole(user, base = 1){
   
   // Пользователь и Менеджер видят только свои задачи (назначенные ИЛИ созданные)
   // Мы используем user.sub (который является ID пользователя)
-  return { sql:`t.assignee_id = $${base} OR t.created_by = $${base}`, params:[user.sub] };
+  return { sql:`t.assignee_worker_id = (SELECT id FROM workers WHERE user_id = $${base}) OR t.created_by = $${base}`, params:[user.sub] };
 }
 
 // LIST ( Фильтрация по роли и имя исполнителя)
@@ -59,7 +59,7 @@ router.get('/', async (req,res)=>{
   let currentParamIndex = p.length + 1; 
 
   if (q.status){ p.push(String(q.status)); cond.push(`t.status=$${currentParamIndex++}`); }
-  if (q.assigneeId){ p.push(Number(q.assigneeId)); cond.push(`t.assignee_id=$${currentParamIndex++}`); }
+  if (q.assigneeId){ p.push(Number(q.assigneeId)); cond.push(`t.assignee_worker_id=$${currentParamIndex++}`); }
   if (q.teamId){ p.push(Number(q.teamId)); cond.push(`t.team_id=$${currentParamIndex++}`); }
   if (String(q.urgent).toLowerCase()==='true'){ cond.push(`t.deadline <= now() + interval '2 days'`); }
   if (String(q.important).toLowerCase()==='true'){ cond.push(`t.importance >= 4`); }
@@ -73,9 +73,9 @@ router.get('/', async (req,res)=>{
   
   // 3. Формируем финальный запрос
   const { rows } = await db.query(
-    `SELECT t.*, u.name AS assignee_name
+    `SELECT t.*, w.name AS assignee_name
      FROM tasks t
-     LEFT JOIN users u ON t.assignee_id = u.id
+     LEFT JOIN workers w ON t.assignee_worker_id = w.id
      WHERE ${finalCondition}
      ORDER BY t.id DESC
      LIMIT $${currentParamIndex++} OFFSET $${currentParamIndex++}`,
@@ -105,9 +105,9 @@ router.post('/', async (req,res)=>{
   try{
     const { rows:[t] } = await db.query(
       `INSERT INTO tasks(title,description,deadline,priority,importance,complexity,
-                        assignee_id,team_id,parent_task_id,status,created_by)
+                        assignee_worker_id,team_id,parent_task_id,status,created_by)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-        RETURNING *, (SELECT name FROM users WHERE id = $7) AS assignee_name`, 
+        RETURNING *, (SELECT name FROM workers WHERE id = $7) AS assignee_name`, 
         p);
     req.app.get('io')?.emit('task.created', t);
     res.status(201).json(t);
@@ -142,7 +142,7 @@ router.patch('/:id', async (req,res)=>{
   const updates = [];
   const p = [];
   for (const [k,v] of Object.entries(bodyParsed.data)){
-    const map = { assigneeId:'assignee_id', teamId:'team_id', parentTaskId:'parent_task_id' };
+    const map = { assigneeId:'assignee_worker_id', teamId:'team_id', parentTaskId:'parent_task_id' };
     const col = map[k] || k;
     updates.push(`${col} = $${p.length+1}`);
     p.push(v);

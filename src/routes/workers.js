@@ -20,6 +20,9 @@ router.get('/', async (req, res, next) => {
         w.position,
         w.created_at,
         w.updated_at,
+        u.login,
+        u.role,
+        u.email,
         COALESCE(
           json_agg(
             json_build_object(
@@ -32,10 +35,11 @@ router.get('/', async (req, res, next) => {
           '[]'
         ) AS skills
       FROM workers w
+      LEFT JOIN users u ON u.id = w.user_id
       LEFT JOIN worker_skills ws ON w.id = ws.worker_id
       LEFT JOIN skills s ON ws.skill_id = s.id
       LEFT JOIN skill_categories c ON s.category_id = c.id
-      GROUP BY w.id
+      GROUP BY w.id, u.login, u.role, u.email
       ORDER BY w.id`
     );
     res.json(result.rows);
@@ -83,6 +87,7 @@ router.post('/',
       const { rows: [result] } = await client.query(
         `SELECT 
           w.id, w.user_id, w.name, w.position, w.created_at, w.updated_at,
+          u.login, u.role, u.email,
           COALESCE(
             json_agg(
               json_build_object(
@@ -95,11 +100,12 @@ router.post('/',
             '[]'
           ) AS skills
         FROM workers w
+        LEFT JOIN users u ON u.id = w.user_id
         LEFT JOIN worker_skills ws ON w.id = ws.worker_id
         LEFT JOIN skills s ON ws.skill_id = s.id
         LEFT JOIN skill_categories c ON s.category_id = c.id
         WHERE w.id = $1
-        GROUP BY w.id`,
+        GROUP BY w.id, u.login, u.role, u.email`,
         [worker.id]
       );
       
@@ -180,6 +186,7 @@ router.patch('/:id',
       const { rows: [result] } = await client.query(
         `SELECT 
           w.id, w.user_id, w.name, w.position, w.created_at, w.updated_at,
+          u.login, u.role, u.email,
           COALESCE(
             json_agg(
               json_build_object(
@@ -192,11 +199,12 @@ router.patch('/:id',
             '[]'
           ) AS skills
         FROM workers w
+        LEFT JOIN users u ON u.id = w.user_id
         LEFT JOIN worker_skills ws ON w.id = ws.worker_id
         LEFT JOIN skills s ON ws.skill_id = s.id
         LEFT JOIN skill_categories c ON s.category_id = c.id
         WHERE w.id = $1
-        GROUP BY w.id`,
+        GROUP BY w.id, u.login, u.role, u.email`,
         [workerId]
       );
       

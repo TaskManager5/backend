@@ -61,6 +61,7 @@ router.get('/', async (req,res)=>{
   if (q.status){ p.push(String(q.status)); cond.push(`t.status=$${currentParamIndex++}`); }
   if (q.assigneeId){ p.push(Number(q.assigneeId)); cond.push(`t.assignee_worker_id=$${currentParamIndex++}`); }
   if (q.teamId){ p.push(Number(q.teamId)); cond.push(`t.team_id=$${currentParamIndex++}`); }
+  if (q.projectId){ p.push(Number(q.projectId)); cond.push(`t.project_id=$${currentParamIndex++}`); }
   if (String(q.urgent).toLowerCase()==='true'){ cond.push(`t.deadline <= now() + interval '2 days'`); }
   if (String(q.important).toLowerCase()==='true'){ cond.push(`t.importance >= 4`); }
   if (String(q.hard).toLowerCase()==='true'){ cond.push(`t.complexity >= 4`); }

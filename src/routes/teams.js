@@ -10,17 +10,27 @@ router.use(verifyAccess);
 // GET /teams — админ все; остальные свои
 router.get('/', async (req, res) => {
   const u = req.user;
+  const q = req.query || {};
+  const projectId = q.projectId ? Number(q.projectId) : null;
+
   if (u.role === 'admin') {
-    const { rows } = await db.query('SELECT id, name, created_at FROM teams ORDER BY id DESC');
+    const { rows } = await db.query(
+      `SELECT id, name, created_at, project_id
+       FROM teams
+       WHERE ($1::bigint IS NULL OR project_id = $1)
+       ORDER BY id DESC`,
+      [projectId]
+    );
     return res.json(rows);
   }
   const { rows } = await db.query(
-    `SELECT t.id, t.name, t.created_at
+    `SELECT t.id, t.name, t.created_at, t.project_id
      FROM teams t
      JOIN team_members tm ON tm.team_id=t.id
      WHERE tm.worker_id=(SELECT id FROM workers WHERE user_id=$1)
+       AND ($2::bigint IS NULL OR t.project_id = $2)
      ORDER BY t.id DESC`,
-    [u.sub]
+    [u.sub, projectId]
   );
   res.json(rows);
 });

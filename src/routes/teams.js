@@ -279,24 +279,28 @@ router.delete('/:id/members/:userId',
   }
 );
 
-// DELETE /teams/:id - удаление команды (только для админа)
+// DELETE /teams/:id - удаление команды (admin или manager этой команды)
 router.delete('/:id',
-  requireRole('admin'),
   validate.params(z.object({ id: z.coerce.number().int().positive() })),
   async (req, res) => {
     const teamId = req.params.id;
+    const u = req.user;
     
     try {
-      // Начинаем транзакцию для безопасного удаления
+      // Проверка доступа: admin ИЛИ manager этой команды
+      if (u.role !== 'admin') {
+        const { rowCount } = await db.query(
+          `SELECT 1 FROM team_members 
+           WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2) 
+             AND role_in_team='manager'`,
+          [teamId, u.sub]
+        );
+        if (!rowCount) return res.status(403).json({ error: 'forbidden' });
+      }
+      
       await db.query('BEGIN');
-      
-      // 1. Сначала удаляем всех участников команды (из-за foreign key constraint)
       await db.query('DELETE FROM team_members WHERE team_id = $1', [teamId]);
-      
-      // 2. Удаляем саму команду
       const { rowCount } = await db.query('DELETE FROM teams WHERE id = $1', [teamId]);
-      
-      // Коммитим транзакцию
       await db.query('COMMIT');
       
       if (!rowCount) {
@@ -306,11 +310,9 @@ router.delete('/:id',
       res.status(204).end();
       
     } catch (err) {
-      // Откатываем транзакцию в случае ошибки
       await db.query('ROLLBACK');
       console.error('Ошибка при удалении команды:', err);
       
-      // Обрабатываем возможные ошибки foreign key
       if (err.code === '23503') {
         return res.status(422).json({ 
           error: 'Невозможно удалить команду. Есть связанные задачи или другие зависимости.' 

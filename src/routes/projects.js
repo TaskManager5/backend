@@ -34,7 +34,7 @@ router.get('/', async (req, res, next) => {
                 `SELECT p.id, p.name, p.description, p.status, p.created_at,
                         (SELECT COUNT(*) FROM project_members WHERE project_id=p.id) AS members_count,
                         (SELECT COUNT(*) FROM tasks WHERE project_id=p.id) AS tasks_count,
-                        (SELECT COUNT(*) FROM teams WHERE project_id=p.id) AS teams_count
+                        (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count
                  FROM projects p
                  ORDER BY p.id`
             );
@@ -49,7 +49,7 @@ router.get('/', async (req, res, next) => {
                     pm.role AS my_role,
                     (SELECT COUNT(*) FROM project_members WHERE project_id=p.id) AS members_count,
                     (SELECT COUNT(*) FROM tasks WHERE project_id=p.id) AS tasks_count,
-                    (SELECT COUNT(*) FROM teams WHERE project_id=p.id) AS teams_count
+                    (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count
              FROM projects p
              JOIN project_members pm ON pm.project_id = p.id AND pm.worker_id = $1
              ORDER BY p.id`,
@@ -61,7 +61,7 @@ router.get('/', async (req, res, next) => {
 
 // --- POST /api/projects — создать проект (admin) ---
 router.post('/',
-    requireRole('admin'),
+    requireRole('admin', 'manager'),
     validate.body(z.object({
         name: z.string().min(1).max(200),
         description: z.string().max(2000).optional().nullable(),
@@ -284,6 +284,34 @@ router.delete('/:id/members/:workerId',
             );
             if (!rowCount) return res.status(404).json({ error: 'not_found' });
             res.json({ ok: true });
+        } catch (err) { next(err); }
+    }
+);
+
+// --- GET /api/projects/:id/teams — команды проекта ---
+router.get('/:id/teams',
+    validate.params(z.object({ id: z.coerce.number().int().positive() })),
+    async (req, res, next) => {
+        try {
+            const projectId = req.params.id;
+            const u = req.user;
+
+            // Проверка доступа: admin, или участник проекта
+            if (u.role !== 'admin') {
+                const workerId = await getMyWorkerId(u.sub);
+                const role = await getProjectRole(projectId, workerId);
+                if (!role) return res.status(404).json({ error: 'not_found' });
+            }
+
+            const { rows } = await db.query(
+                `SELECT t.id, t.name, t.created_at
+                 FROM team_projects tp
+                 JOIN teams t ON t.id = tp.team_id
+                 WHERE tp.project_id = $1
+                 ORDER BY t.id`,
+                [projectId]
+            );
+            res.json(rows);
         } catch (err) { next(err); }
     }
 );

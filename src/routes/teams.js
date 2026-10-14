@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { db } from '../services/db.js';
+import { db, pool } from '../services/db.js';
 import { verifyAccess, requireRole } from '../middleware/auth.js';
 import { validate } from '../middleware/validate.js';
 
 export const router = Router();
 router.use(verifyAccess);
 
-// GET /teams — админ все; остальные свои
+// GET /teams — список команд. Фильтр по projectId через team_projects.
 router.get('/', async (req, res) => {
   const u = req.user;
   const q = req.query || {};
@@ -15,20 +15,28 @@ router.get('/', async (req, res) => {
 
   if (u.role === 'admin') {
     const { rows } = await db.query(
-      `SELECT id, name, created_at, project_id
-       FROM teams
-       WHERE ($1::bigint IS NULL OR project_id = $1)
-       ORDER BY id DESC`,
+      `SELECT t.id, t.name, t.created_at,
+              (SELECT array_agg(project_id) FROM team_projects WHERE team_id=t.id) AS project_ids
+       FROM teams t
+       WHERE ($1::bigint IS NULL OR EXISTS (
+           SELECT 1 FROM team_projects tp WHERE tp.team_id=t.id AND tp.project_id=$1
+       ))
+       ORDER BY t.id DESC`,
       [projectId]
     );
     return res.json(rows);
   }
+
+  // Для всех остальных: команды, где он участник
   const { rows } = await db.query(
-    `SELECT t.id, t.name, t.created_at, t.project_id
+    `SELECT t.id, t.name, t.created_at,
+            (SELECT array_agg(project_id) FROM team_projects WHERE team_id=t.id) AS project_ids
      FROM teams t
      JOIN team_members tm ON tm.team_id=t.id
      WHERE tm.worker_id=(SELECT id FROM workers WHERE user_id=$1)
-       AND ($2::bigint IS NULL OR t.project_id = $2)
+       AND ($2::bigint IS NULL OR EXISTS (
+           SELECT 1 FROM team_projects tp WHERE tp.team_id=t.id AND tp.project_id=$2
+       ))
      ORDER BY t.id DESC`,
     [u.sub, projectId]
   );
@@ -61,16 +69,156 @@ router.get('/:id/members',
   }
 );
 
-// POST /teams — только админ
+// POST /teams — админ или менеджер. Создатель становится manager'ом команды.
+// Опционально: projectId — сразу привязать к проекту.
 router.post('/',
-  requireRole('admin'),
-  validate.body(z.object({ name: z.string().min(1) })),
-  async (req,res)=>{
-    const { rows:[t] } = await db.query(
-      'INSERT INTO teams(name) VALUES($1) RETURNING id,name,created_at',
-      [req.body.name]
-    );
-    res.status(201).json(t);
+  requireRole('admin', 'manager'),
+  validate.body(z.object({
+    name: z.string().min(1),
+    projectId: z.coerce.number().int().positive().optional()
+  })),
+  async (req,res,next)=>{
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // 1. Создаём команду
+      const { rows:[t] } = await client.query(
+        'INSERT INTO teams(name) VALUES($1) RETURNING id,name,created_at',
+        [req.body.name]
+      );
+
+      // 2. Создателя делаем manager'ом команды (если у него есть worker)
+      const { rows: [myWorker] } = await client.query(
+        'SELECT id FROM workers WHERE user_id=$1',
+        [req.user.sub]
+      );
+      if (myWorker) {
+        await client.query(
+          `INSERT INTO team_members(team_id, worker_id, role_in_team)
+           VALUES($1, $2, 'manager')
+           ON CONFLICT (team_id, worker_id) DO UPDATE SET role_in_team='manager'`,
+          [t.id, myWorker.id]
+        );
+      }
+
+      // 3. Привязка к проекту (если передан projectId)
+      if (req.body.projectId) {
+        await client.query(
+          `INSERT INTO team_projects (team_id, project_id)
+           VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [t.id, req.body.projectId]
+        );
+      }
+
+      await client.query('COMMIT');
+      res.status(201).json(t);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  }
+);
+
+// GET /teams/:id/projects — проекты, к которым привязана команда
+router.get('/:id/projects',
+  validate.params(z.object({ id: z.coerce.number().int().positive() })),
+  async (req, res, next) => {
+    try {
+      const teamId = req.params.id;
+      const u = req.user;
+
+      // Проверка доступа: админ, или участник команды
+      if (u.role !== 'admin') {
+        const { rowCount } = await db.query(
+          `SELECT 1 FROM team_members WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)`,
+          [teamId, u.sub]
+        );
+        if (!rowCount) return res.status(404).json({ error: 'not_found' });
+      }
+
+      const { rows } = await db.query(
+        `SELECT p.id, p.name, p.description, p.status
+         FROM team_projects tp
+         JOIN projects p ON p.id = tp.project_id
+         WHERE tp.team_id = $1
+         ORDER BY p.id`,
+        [teamId]
+      );
+      res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
+// POST /teams/:id/projects — привязать команду к проекту (owner/manager команды + owner/manager проекта)
+router.post('/:id/projects',
+  validate.params(z.object({ id: z.coerce.number().int().positive() })),
+  validate.body(z.object({ projectId: z.coerce.number().int().positive() })),
+  async (req, res, next) => {
+    try {
+      const teamId = req.params.id;
+      const { projectId } = req.body;
+      const u = req.user;
+
+      // Проверка: админ, или manager команды И owner/manager проекта
+      if (u.role !== 'admin') {
+        const { rowCount: isTeamManager } = await db.query(
+          `SELECT 1 FROM team_members
+           WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
+             AND role_in_team='manager'`,
+          [teamId, u.sub]
+        );
+        if (!isTeamManager) return res.status(403).json({ error: 'forbidden' });
+
+        const { rowCount: isProjectMember } = await db.query(
+          `SELECT 1 FROM project_members
+           WHERE project_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
+             AND role IN ('owner','manager')`,
+          [projectId, u.sub]
+        );
+        if (!isProjectMember) return res.status(403).json({ error: 'forbidden' });
+      }
+
+      await db.query(
+        `INSERT INTO team_projects (team_id, project_id)
+         VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [teamId, projectId]
+      );
+      res.status(201).json({ ok: true });
+    } catch (err) { next(err); }
+  }
+);
+
+// DELETE /teams/:id/projects/:projectId — отвязать команду от проекта
+router.delete('/:id/projects/:projectId',
+  validate.params(z.object({
+    id: z.coerce.number().int().positive(),
+    projectId: z.coerce.number().int().positive()
+  })),
+  async (req, res, next) => {
+    try {
+      const { id: teamId, projectId } = req.params;
+      const u = req.user;
+
+      if (u.role !== 'admin') {
+        const { rowCount: isTeamManager } = await db.query(
+          `SELECT 1 FROM team_members
+           WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
+             AND role_in_team='manager'`,
+          [teamId, u.sub]
+        );
+        if (!isTeamManager) return res.status(403).json({ error: 'forbidden' });
+      }
+
+      const { rowCount } = await db.query(
+        `DELETE FROM team_projects WHERE team_id=$1 AND project_id=$2`,
+        [teamId, projectId]
+      );
+      if (!rowCount) return res.status(404).json({ error: 'not_found' });
+      res.json({ ok: true });
+    } catch (err) { next(err); }
   }
 );
 

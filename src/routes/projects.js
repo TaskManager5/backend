@@ -31,7 +31,7 @@ router.get('/', async (req, res, next) => {
 
         if (u.role === 'admin') {
             const { rows } = await db.query(
-                `SELECT p.id, p.name, p.description, p.status, p.created_at,
+                `SELECT p.id, p.name, p.description, p.status, p.visibility, p.created_at,
                         (SELECT COUNT(*) FROM project_members WHERE project_id=p.id) AS members_count,
                         (SELECT COUNT(*) FROM tasks WHERE project_id=p.id) AS tasks_count,
                         (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count
@@ -42,17 +42,33 @@ router.get('/', async (req, res, next) => {
         }
 
         const workerId = await getMyWorkerId(u.sub);
-        if (!workerId) return res.json([]);
+        if (!workerId) {
+            // Даже без worker'а показываем публичные
+            const { rows } = await db.query(
+                `SELECT p.id, p.name, p.description, p.status, p.visibility, p.created_at, NULL AS my_role,
+                        (SELECT COUNT(*) FROM project_members WHERE project_id=p.id) AS members_count,
+                        (SELECT COUNT(*) FROM tasks WHERE project_id=p.id) AS tasks_count,
+                        (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count
+                 FROM projects p
+                 WHERE p.visibility = 'public'
+                 ORDER BY p.id`
+            );
+            return res.json(rows);
+        }
 
+        // Свои + публичные (к которым не подключён)
         const { rows } = await db.query(
-            `SELECT p.id, p.name, p.description, p.status, p.created_at,
+            `SELECT p.id, p.name, p.description, p.status, p.visibility, p.created_at,
                     pm.role AS my_role,
                     (SELECT COUNT(*) FROM project_members WHERE project_id=p.id) AS members_count,
                     (SELECT COUNT(*) FROM tasks WHERE project_id=p.id) AS tasks_count,
                     (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count
              FROM projects p
-             JOIN project_members pm ON pm.project_id = p.id AND pm.worker_id = $1
-             ORDER BY p.id`,
+             LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.worker_id = $1
+             WHERE pm.worker_id IS NOT NULL OR p.visibility = 'public'
+             ORDER BY 
+                CASE WHEN pm.worker_id IS NOT NULL THEN 0 ELSE 1 END,
+                p.id`,
             [workerId]
         );
         res.json(rows);
@@ -65,19 +81,20 @@ router.post('/',
     validate.body(z.object({
         name: z.string().min(1).max(200),
         description: z.string().max(2000).optional().nullable(),
-        ownerWorkerId: z.coerce.number().int().positive().optional()
+        ownerWorkerId: z.coerce.number().int().positive().optional(),
+        visibility: z.enum(['private', 'public']).default('private').optional()
     })),
     async (req, res, next) => {
         const client = await pool.connect();
         try {
             await client.query('BEGIN');
-            const { name, description, ownerWorkerId } = req.body;
+            const { name, description, ownerWorkerId, visibility } = req.body;
 
             const { rows: [project] } = await client.query(
-                `INSERT INTO projects (name, description, created_by)
-                 VALUES ($1, $2, (SELECT id FROM workers WHERE user_id=$3))
-                 RETURNING id, name, description, status, created_at`,
-                [name, description || null, req.user.sub]
+                `INSERT INTO projects (name, description, created_by, visibility)
+                 VALUES ($1, $2, (SELECT id FROM workers WHERE user_id=$3), $4)
+                 RETURNING id, name, description, status, visibility, created_at`,
+                [name, description || null, req.user.sub, visibility || 'private']
             );
 
             if (ownerWorkerId) {
@@ -141,7 +158,8 @@ router.patch('/:id',
     validate.body(z.object({
         name: z.string().min(1).max(200).optional(),
         description: z.string().max(2000).optional().nullable(),
-        status: z.enum(['active', 'archived']).optional()
+        status: z.enum(['active', 'archived']).optional(),
+        visibility: z.enum(['private', 'public']).optional()
     })),
     async (req, res, next) => {
         try {
@@ -154,13 +172,14 @@ router.patch('/:id',
                 if (role !== 'owner') return res.status(403).json({ error: 'forbidden' });
             }
 
-            const { name, description, status } = req.body;
+            const { name, description, status, visibility } = req.body;
             const fields = [];
             const values = [];
             let i = 1;
             if (name !== undefined) { fields.push(`name=$${i++}`); values.push(name); }
             if (description !== undefined) { fields.push(`description=$${i++}`); values.push(description); }
             if (status !== undefined) { fields.push(`status=$${i++}`); values.push(status); }
+            if (visibility !== undefined) { fields.push(`visibility=$${i++}`); values.push(visibility); }
             if (!fields.length) return res.status(400).json({ error: 'no_fields' });
 
             fields.push(`updated_at=now()`);
@@ -283,6 +302,40 @@ router.delete('/:id/members/:workerId',
                 [projectId, workerId]
             );
             if (!rowCount) return res.status(404).json({ error: 'not_found' });
+            res.json({ ok: true });
+        } catch (err) { next(err); }
+    }
+);
+
+// --- POST /api/projects/:id/join — подключиться к публичному проекту ---
+router.post('/:id/join',
+    validate.params(z.object({ id: z.coerce.number().int().positive() })),
+    async (req, res, next) => {
+        try {
+            const projectId = req.params.id;
+            const u = req.user;
+
+            const workerId = await getMyWorkerId(u.sub);
+            if (!workerId) return res.status(400).json({ error: 'no_worker' });
+
+            // Проверить, что проект публичный
+            const { rows: [project] } = await db.query(
+                'SELECT visibility FROM projects WHERE id=$1',
+                [projectId]
+            );
+            if (!project) return res.status(404).json({ error: 'not_found' });
+            if (project.visibility !== 'public') {
+                return res.status(403).json({ error: 'not_public' });
+            }
+
+            // Добавить в участники (если ещё не)
+            await db.query(
+                `INSERT INTO project_members (project_id, worker_id, role)
+                 VALUES ($1, $2, 'member')
+                 ON CONFLICT (project_id, worker_id) DO NOTHING`,
+                [projectId, workerId]
+            );
+
             res.json({ ok: true });
         } catch (err) { next(err); }
     }

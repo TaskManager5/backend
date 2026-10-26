@@ -162,23 +162,25 @@ router.post('/:id/projects',
       const { projectId } = req.body;
       const u = req.user;
 
-      // Проверка: админ, или manager команды И owner/manager проекта
+      // Проверка: админ, ИЛИ owner/manager проекта, ИЛИ manager команды
       if (u.role !== 'admin') {
+        const { rowCount: isProjectManager } = await db.query(
+          `SELECT 1 FROM project_members
+           WHERE project_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
+             AND role IN ('owner','manager')`,
+          [projectId, u.sub]
+        );
+
         const { rowCount: isTeamManager } = await db.query(
           `SELECT 1 FROM team_members
            WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
              AND role_in_team='manager'`,
           [teamId, u.sub]
         );
-        if (!isTeamManager) return res.status(403).json({ error: 'forbidden' });
 
-        const { rowCount: isProjectMember } = await db.query(
-          `SELECT 1 FROM project_members
-           WHERE project_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
-             AND role IN ('owner','manager')`,
-          [projectId, u.sub]
-        );
-        if (!isProjectMember) return res.status(403).json({ error: 'forbidden' });
+        if (!isProjectManager && !isTeamManager) {
+          return res.status(403).json({ error: 'forbidden' });
+        }
       }
 
       await db.query(
@@ -203,13 +205,23 @@ router.delete('/:id/projects/:projectId',
       const u = req.user;
 
       if (u.role !== 'admin') {
+        const { rowCount: isProjectManager } = await db.query(
+          `SELECT 1 FROM project_members
+           WHERE project_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
+             AND role IN ('owner','manager')`,
+          [projectId, u.sub]
+        );
+
         const { rowCount: isTeamManager } = await db.query(
           `SELECT 1 FROM team_members
            WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
              AND role_in_team='manager'`,
           [teamId, u.sub]
         );
-        if (!isTeamManager) return res.status(403).json({ error: 'forbidden' });
+
+        if (!isProjectManager && !isTeamManager) {
+          return res.status(403).json({ error: 'forbidden' });
+        }
       }
 
       const { rowCount } = await db.query(

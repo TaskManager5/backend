@@ -13,11 +13,12 @@ const PostTask = z.object({
   description: z.string().default(''),
   deadline: z.coerce.date(),
   priority: z.enum(['low','medium','high']),
-  importance: z.number().int().min(1).max(5),
-  complexity: z.number().int().min(1).max(5),
-  assigneeId: z.number().int().positive().nullable().optional(),
-  teamId: z.number().int().positive().nullable().optional(),
-  parentTaskId: z.number().int().positive().nullable().optional(),
+  importance: z.coerce.number().int().min(1).max(5),
+  complexity: z.coerce.number().int().min(1).max(5),
+  assigneeId: z.coerce.number().int().positive().nullable().optional(),
+  teamId: z.coerce.number().int().positive().nullable().optional(),
+  parentTaskId: z.coerce.number().int().positive().nullable().optional(),
+  projectId: z.coerce.number().int().positive().nullable().optional(),
   status: z.enum(['new','in_progress','done','canceled']).default('new')
 });
 const PatchTask = PostTask.partial();
@@ -27,9 +28,22 @@ function whereByRole(user, base = 1){
   // Администратор видит всё
   if (user.role === 'admin') return { sql:'TRUE', params:[] };
   
-  // Пользователь и Менеджер видят только свои задачи (назначенные ИЛИ созданные)
-  // Мы используем user.sub (который является ID пользователя)
-  return { sql:`t.assignee_worker_id = (SELECT id FROM workers WHERE user_id = $${base}) OR t.created_by = $${base}`, params:[user.sub] };
+  // Пользователь и Менеджер видят:
+  // 1) свои задачи (назначенные или созданные)
+  // 2) задачи БЕЗ исполнителя в проектах, где они участник (для «Взять себе»)
+  return { 
+    sql: `t.assignee_worker_id = (SELECT id FROM workers WHERE user_id = $${base}) 
+          OR t.created_by = $${base}
+          OR (
+            t.assignee_worker_id IS NULL 
+            AND t.project_id IS NOT NULL
+            AND t.project_id IN (
+              SELECT project_id FROM project_members 
+              WHERE worker_id = (SELECT id FROM workers WHERE user_id = $${base})
+            )
+          )`, 
+    params:[user.sub] 
+  };
 }
 
 // LIST ( Фильтрация по роли и имя исполнителя)
@@ -99,15 +113,15 @@ router.post('/', async (req,res)=>{
     body.title, body.description, body.deadline,
     body.priority, body.importance, body.complexity,
     body.assigneeId ?? null, body.teamId ?? null,
-    body.parentTaskId ?? null,
+    body.parentTaskId ?? null, body.projectId ?? null,
     body.status, req.user.sub
   ];
 
   try{
     const { rows:[t] } = await db.query(
       `INSERT INTO tasks(title,description,deadline,priority,importance,complexity,
-                        assignee_worker_id,team_id,parent_task_id,status,created_by)
-        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                        assignee_worker_id,team_id,parent_task_id,project_id,status,created_by)
+        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
         RETURNING *, (SELECT name FROM workers WHERE id = $7) AS assignee_name`, 
         p);
     req.app.get('io')?.emit('task.created', t);
@@ -143,7 +157,7 @@ router.patch('/:id', async (req,res)=>{
   const updates = [];
   const p = [];
   for (const [k,v] of Object.entries(bodyParsed.data)){
-    const map = { assigneeId:'assignee_worker_id', teamId:'team_id', parentTaskId:'parent_task_id' };
+    const map = { assigneeId:'assignee_worker_id', teamId:'team_id', parentTaskId:'parent_task_id', projectId:'project_id' };
     const col = map[k] || k;
     updates.push(`${col} = $${p.length+1}`);
     p.push(v);

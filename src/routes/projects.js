@@ -360,11 +360,21 @@ router.get('/:id/teams',
             const projectId = req.params.id;
             const u = req.user;
 
-            // Проверка доступа: admin, или участник проекта
+            // Проверка доступа: admin, или участник, или публичный проект
             if (u.role !== 'admin') {
                 const workerId = await getMyWorkerId(u.sub);
                 const role = await getProjectRole(projectId, workerId);
-                if (!role) return res.status(404).json({ error: 'not_found' });
+                if (!role) {
+                    // Если не участник — проверить публичность
+                    const { rows: [proj] } = await db.query(
+                        'SELECT visibility FROM projects WHERE id=$1',
+                        [projectId]
+                    );
+                    if (!proj) return res.status(404).json({ error: 'not_found' });
+                    if (proj.visibility !== 'public') {
+                        return res.status(403).json({ error: 'forbidden' });
+                    }
+                }
             }
 
             const { rows } = await db.query(

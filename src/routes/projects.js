@@ -32,11 +32,21 @@ router.get('/', async (req, res, next) => {
         if (u.role === 'admin') {
             const { rows } = await db.query(
                 `SELECT p.id, p.name, p.description, p.status, p.visibility, p.created_at,
+                        (SELECT role FROM project_members 
+                         WHERE project_id=p.id 
+                           AND worker_id=(SELECT id FROM workers WHERE user_id=$1)) AS my_role,
+                        (SELECT 1 FROM project_join_requests 
+                         WHERE project_id=p.id 
+                           AND worker_id=(SELECT id FROM workers WHERE user_id=$1)
+                           AND status='pending') IS NOT NULL AS has_pending_request,
                         (SELECT COUNT(*) FROM project_members WHERE project_id=p.id) AS members_count,
                         (SELECT COUNT(*) FROM tasks WHERE project_id=p.id) AS tasks_count,
-                        (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count
+                        (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count,
+                        (SELECT COUNT(*) FROM project_join_requests 
+                         WHERE project_id=p.id AND status='pending') AS pending_requests_count
                  FROM projects p
-                 ORDER BY p.id`
+                 ORDER BY p.id`,
+                [u.sub]
             );
             return res.json(rows);
         }
@@ -60,9 +70,13 @@ router.get('/', async (req, res, next) => {
         const { rows } = await db.query(
             `SELECT p.id, p.name, p.description, p.status, p.visibility, p.created_at,
                     pm.role AS my_role,
+                    (SELECT 1 FROM project_join_requests 
+                     WHERE project_id=p.id AND worker_id=$1 AND status='pending') IS NOT NULL AS has_pending_request,
                     (SELECT COUNT(*) FROM project_members WHERE project_id=p.id) AS members_count,
                     (SELECT COUNT(*) FROM tasks WHERE project_id=p.id) AS tasks_count,
-                    (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count
+                    (SELECT COUNT(*) FROM team_projects WHERE project_id=p.id) AS teams_count,
+                    (SELECT COUNT(*) FROM project_join_requests 
+                     WHERE project_id=p.id AND status='pending') AS pending_requests_count
              FROM projects p
              LEFT JOIN project_members pm ON pm.project_id = p.id AND pm.worker_id = $1
              WHERE pm.worker_id IS NOT NULL OR p.visibility = 'public'
@@ -318,8 +332,8 @@ router.delete('/:id/members/:workerId',
     }
 );
 
-// --- POST /api/projects/:id/join — подключиться к публичному проекту ---
-router.post('/:id/join',
+// --- POST /api/projects/:id/request-join — подать заявку на подключение ---
+router.post('/:id/request-join',
     validate.params(z.object({ id: z.coerce.number().int().positive() })),
     async (req, res, next) => {
         try {
@@ -339,14 +353,150 @@ router.post('/:id/join',
                 return res.status(403).json({ error: 'not_public' });
             }
 
-            // Добавить в участники (если ещё не)
-            await db.query(
-                `INSERT INTO project_members (project_id, worker_id, role)
-                 VALUES ($1, $2, 'member')
-                 ON CONFLICT (project_id, worker_id) DO NOTHING`,
+            // Проверить, что уже не участник
+            const { rowCount: isMember } = await db.query(
+                'SELECT 1 FROM project_members WHERE project_id=$1 AND worker_id=$2',
+                [projectId, workerId]
+            );
+            if (isMember) return res.status(400).json({ error: 'already_member' });
+
+            // Создать заявку (или вернуть существующую pending)
+            const { rows: [req_] } = await db.query(
+                `INSERT INTO project_join_requests (project_id, worker_id, status)
+                 VALUES ($1, $2, 'pending')
+                 ON CONFLICT (project_id, worker_id) 
+                 WHERE status = 'pending'
+                 DO UPDATE SET created_at = now()
+                 RETURNING id, project_id, worker_id, status, created_at`,
                 [projectId, workerId]
             );
 
+            res.status(201).json(req_);
+        } catch (err) { next(err); }
+    }
+);
+
+// --- GET /api/projects/:id/join-requests — список заявок (owner/manager) ---
+router.get('/:id/join-requests',
+    validate.params(z.object({ id: z.coerce.number().int().positive() })),
+    async (req, res, next) => {
+        try {
+            const projectId = req.params.id;
+            const u = req.user;
+
+            // Проверка прав: admin, owner, manager
+            if (u.role !== 'admin') {
+                const workerId = await getMyWorkerId(u.sub);
+                const role = await getProjectRole(projectId, workerId);
+                if (role !== 'owner' && role !== 'manager') {
+                    return res.status(403).json({ error: 'forbidden' });
+                }
+            }
+
+            const { rows } = await db.query(
+                `SELECT r.id, r.worker_id, w.name, w.position, w.user_id,
+                        u.login, r.status, r.created_at
+                 FROM project_join_requests r
+                 JOIN workers w ON w.id = r.worker_id
+                 LEFT JOIN users u ON u.id = w.user_id
+                 WHERE r.project_id = $1 AND r.status = 'pending'
+                 ORDER BY r.created_at DESC`,
+                [projectId]
+            );
+            res.json(rows);
+        } catch (err) { next(err); }
+    }
+);
+
+// --- POST /api/projects/:id/join-requests/:reqId/approve — одобрить ---
+router.post('/:id/join-requests/:reqId/approve',
+    validate.params(z.object({ 
+        id: z.coerce.number().int().positive(),
+        reqId: z.coerce.number().int().positive()
+    })),
+    async (req, res, next) => {
+        const client = await pool.connect();
+        try {
+            const { id: projectId, reqId } = req.params;
+            const u = req.user;
+
+            // Проверка прав
+            if (u.role !== 'admin') {
+                const workerId = await getMyWorkerId(u.sub);
+                const role = await getProjectRole(projectId, workerId);
+                if (role !== 'owner' && role !== 'manager') {
+                    return res.status(403).json({ error: 'forbidden' });
+                }
+            }
+
+            await client.query('BEGIN');
+
+            // Найти заявку
+            const { rows: [req_] } = await client.query(
+                `SELECT id, worker_id, status FROM project_join_requests 
+                 WHERE id=$1 AND project_id=$2 AND status='pending'`,
+                [reqId, projectId]
+            );
+            if (!req_) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ error: 'not_found' });
+            }
+
+            // Добавить в проект
+            await client.query(
+                `INSERT INTO project_members (project_id, worker_id, role)
+                 VALUES ($1, $2, 'member')
+                 ON CONFLICT (project_id, worker_id) DO NOTHING`,
+                [projectId, req_.worker_id]
+            );
+
+            // Обновить заявку
+            const decidedBy = await getMyWorkerId(u.sub);
+            await client.query(
+                `UPDATE project_join_requests 
+                 SET status='approved', decided_at=now(), decided_by=$1 
+                 WHERE id=$2`,
+                [decidedBy, reqId]
+            );
+
+            await client.query('COMMIT');
+            res.json({ ok: true });
+        } catch (err) {
+            await client.query('ROLLBACK');
+            next(err);
+        } finally {
+            client.release();
+        }
+    }
+);
+
+// --- POST /api/projects/:id/join-requests/:reqId/reject — отклонить ---
+router.post('/:id/join-requests/:reqId/reject',
+    validate.params(z.object({ 
+        id: z.coerce.number().int().positive(),
+        reqId: z.coerce.number().int().positive()
+    })),
+    async (req, res, next) => {
+        try {
+            const { id: projectId, reqId } = req.params;
+            const u = req.user;
+
+            if (u.role !== 'admin') {
+                const workerId = await getMyWorkerId(u.sub);
+                const role = await getProjectRole(projectId, workerId);
+                if (role !== 'owner' && role !== 'manager') {
+                    return res.status(403).json({ error: 'forbidden' });
+                }
+            }
+
+            const decidedBy = await getMyWorkerId(u.sub);
+            const { rowCount } = await db.query(
+                `UPDATE project_join_requests 
+                 SET status='rejected', decided_at=now(), decided_by=$1 
+                 WHERE id=$2 AND project_id=$3 AND status='pending'`,
+                [decidedBy, reqId, projectId]
+            );
+            if (!rowCount) return res.status(404).json({ error: 'not_found' });
             res.json({ ok: true });
         } catch (err) { next(err); }
     }

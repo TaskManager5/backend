@@ -14,6 +14,7 @@ import { openapi } from './docs/openapi.js';
 // ИМПОРТЫ МАРШРУТОВ
 import { router as users } from './routes/users.js';
 import { router as auth } from './routes/auth.js';
+import { router as keycloak } from './routes/keycloak.js';
 import { router as teams } from './routes/teams.js';
 import { router as tasks } from './routes/tasks.js';
 import { router as analytics } from './routes/analytics.js';
@@ -60,6 +61,7 @@ app.use('/api/auth/refresh', rlAuthRefresh);
 app.use(rlGlobal);
 
 app.use('/api/auth', auth);
+app.use('/api/auth', keycloak);
 app.use('/api/teams', teams);
 app.use('/api/tasks', tasks);
 app.use('/api/analytics', analytics);

@@ -122,7 +122,6 @@ router.post('/',
 // PATCH /api/workers/:id — редактировать сотрудника
 // Может админ или менеджер.
 router.patch('/:id',
-  requireRole('admin', 'manager'),
   validate.params(z.object({ id: z.coerce.number().int().positive() })),
   validate.body(z.object({
     name: z.string().min(1).optional(),
@@ -130,7 +129,20 @@ router.patch('/:id',
     skill_ids: z.array(z.number().int().positive()).optional()
   })),
   async (req, res, next) => {
-    const workerId = req.params.id;
+    const workerId = parseInt(req.params.id, 10);
+    const u = req.user;
+
+    // Проверка прав: admin/manager — любой, user — только свой
+    if (u.role !== 'admin' && u.role !== 'manager') {
+      const { rows: [myWorker] } = await db.query(
+        'SELECT id FROM workers WHERE user_id=$1',
+        [u.sub]
+      );
+      if (!myWorker || Number(myWorker.id) !== workerId) {
+        return res.status(403).json({ error: 'forbidden' });
+      }
+    }
+
     const { name, position, skill_ids } = req.body;
     
     const client = await pool.connect();

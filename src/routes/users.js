@@ -186,7 +186,7 @@ router.patch('/:id',
   // Проверка прав: либо админ, либо сам пользователь редактирует себя
   async (req, res, next) => {
       const targetId = parseInt(req.params.id);
-      if (req.user.role !== 'admin' && req.user.sub !== targetId) {
+      if (req.user.role !== 'admin' && String(req.user.sub) !== String(targetId)) {
           return res.status(403).json({ error: 'forbidden' });
       }
       next();

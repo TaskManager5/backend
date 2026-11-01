@@ -15,46 +15,56 @@ router.get('/', async (req, res) => {
 
   if (u.role === 'admin') {
     const { rows } = await db.query(
-      `SELECT t.id, t.name, t.created_at,
-              (SELECT array_agg(project_id) FROM team_projects WHERE team_id=t.id) AS project_ids
+      `SELECT t.id, t.name, t.created_at, t.visibility,
+              (SELECT array_agg(project_id) FROM team_projects WHERE team_id=t.id) AS project_ids,
+              (SELECT role_in_team FROM team_members 
+               WHERE team_id=t.id AND worker_id=(SELECT id FROM workers WHERE user_id=$2)) AS my_role,
+              (SELECT 1 FROM team_join_requests 
+               WHERE team_id=t.id AND worker_id=(SELECT id FROM workers WHERE user_id=$2)
+               AND status='pending') IS NOT NULL AS has_pending_request,
+              (SELECT COUNT(*) FROM team_join_requests 
+               WHERE team_id=t.id AND status='pending') AS pending_requests_count
        FROM teams t
        WHERE ($1::bigint IS NULL OR EXISTS (
            SELECT 1 FROM team_projects tp WHERE tp.team_id=t.id AND tp.project_id=$1
        ))
        ORDER BY t.id DESC`,
-      [projectId]
+      [projectId, u.sub]
     );
     return res.json(rows);
   }
 
-  // Для всех остальных: команды, где он участник
+  // Для всех остальных: свои + public
   const { rows } = await db.query(
-    `SELECT t.id, t.name, t.created_at,
-            (SELECT array_agg(project_id) FROM team_projects WHERE team_id=t.id) AS project_ids
+    `SELECT t.id, t.name, t.created_at, t.visibility,
+            (SELECT array_agg(project_id) FROM team_projects WHERE team_id=t.id) AS project_ids,
+            tm.role_in_team AS my_role,
+            (SELECT 1 FROM team_join_requests 
+             WHERE team_id=t.id AND worker_id=(SELECT id FROM workers WHERE user_id=$1)
+             AND status='pending') IS NOT NULL AS has_pending_request,
+            (SELECT COUNT(*) FROM team_join_requests 
+             WHERE team_id=t.id AND status='pending') AS pending_requests_count
      FROM teams t
-     JOIN team_members tm ON tm.team_id=t.id
-     WHERE tm.worker_id=(SELECT id FROM workers WHERE user_id=$1)
+     LEFT JOIN team_members tm ON tm.team_id=t.id 
+       AND tm.worker_id=(SELECT id FROM workers WHERE user_id=$1)
+     WHERE (tm.worker_id IS NOT NULL OR t.visibility = 'public')
        AND ($2::bigint IS NULL OR EXISTS (
-           SELECT 1 FROM team_projects tp WHERE tp.team_id=t.id AND tp.project_id=$2
-       ))
-     ORDER BY t.id DESC`,
+         SELECT 1 FROM team_projects tp WHERE tp.team_id=t.id AND tp.project_id=$2
+     ))
+     ORDER BY 
+       CASE WHEN tm.worker_id IS NOT NULL THEN 0 ELSE 1 END,
+       t.id DESC`,
     [u.sub, projectId]
   );
   res.json(rows);
 });
 
 
-// GET /teams/:id/members — доступ тем, кто в команде, или админ
+// GET /teams/:id/members — доступ всем (для заявок)
 router.get('/:id/members',
   validate.params(z.object({ id: z.coerce.number().int().positive() })),
   async (req, res) => {
     const teamId = req.params.id;
-    const u = req.user;
-    const { rowCount: allowed } = await db.query(
-      `SELECT 1 FROM team_members WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2)`,
-      [teamId, u.sub]
-    );
-    if (u.role !== 'admin' && !allowed) return res.status(404).json({ error: 'not_found' });
 
     const { rows } = await db.query(
       `SELECT w.id, w.name, w.position, u.login, tm.role_in_team AS "roleInTeam"
@@ -333,5 +343,214 @@ router.delete('/:id',
       
       res.status(500).json({ error: 'Ошибка сервера при удалении команды' });
     }
+  }
+);
+
+// PATCH /api/teams/:id/visibility — изменить видимость команды (owner/manager)
+router.patch('/:id/visibility',
+  validate.params(z.object({ id: z.coerce.number().int().positive() })),
+  validate.body(z.object({ visibility: z.enum(['private', 'public']) })),
+  async (req, res, next) => {
+    try {
+      const teamId = req.params.id;
+      const u = req.user;
+
+      if (u.role !== 'admin') {
+        const { rowCount: isManager } = await db.query(
+          `SELECT 1 FROM team_members 
+           WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2) 
+           AND role_in_team='manager'`,
+          [teamId, u.sub]
+        );
+        if (!isManager) return res.status(403).json({ error: 'forbidden' });
+      }
+
+      const { rows: [team] } = await db.query(
+        `UPDATE teams SET visibility=$1 WHERE id=$2 
+         RETURNING id, name, visibility, updated_at`,
+        [req.body.visibility, teamId]
+      );
+      if (!team) return res.status(404).json({ error: 'not_found' });
+      res.json(team);
+    } catch (err) { next(err); }
+  }
+);
+
+// ==================== ЗАЯВКИ В КОМАНДУ ====================
+
+// POST /api/teams/:id/request-join — подать заявку на вступление в команду
+router.post('/:id/request-join',
+  validate.params(z.object({ id: z.coerce.number().int().positive() })),
+  async (req, res, next) => {
+    try {
+      const teamId = req.params.id;
+      const u = req.user;
+
+      const { rows: [myWorker] } = await db.query(
+        'SELECT id FROM workers WHERE user_id=$1',
+        [u.sub]
+      );
+      if (!myWorker) return res.status(400).json({ error: 'no_worker' });
+
+      // Проверка, что команда публичная
+      const { rows: [team] } = await db.query(
+        'SELECT visibility FROM teams WHERE id=$1',
+        [teamId]
+      );
+      if (!team) return res.status(404).json({ error: 'not_found' });
+      if (team.visibility !== 'public') {
+        return res.status(403).json({ error: 'not_public' });
+      }
+
+      const { rowCount: isMember } = await db.query(
+        'SELECT 1 FROM team_members WHERE team_id=$1 AND worker_id=$2',
+        [teamId, myWorker.id]
+      );
+      if (isMember) return res.status(400).json({ error: 'already_member' });
+
+      const { rows: [req_] } = await db.query(
+        `INSERT INTO team_join_requests (team_id, worker_id, status)
+         VALUES ($1, $2, 'pending')
+         ON CONFLICT (team_id, worker_id) 
+         WHERE status = 'pending'
+         DO UPDATE SET created_at = now()
+         RETURNING id, team_id, worker_id, status, created_at`,
+        [teamId, myWorker.id]
+      );
+
+      res.status(201).json(req_);
+    } catch (err) { next(err); }
+  }
+);
+
+router.get('/:id/join-requests',
+  validate.params(z.object({ id: z.coerce.number().int().positive() })),
+  async (req, res, next) => {
+    try {
+      const teamId = req.params.id;
+      const u = req.user;
+
+      if (u.role !== 'admin') {
+        const { rowCount: isManager } = await db.query(
+          `SELECT 1 FROM team_members 
+           WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2) 
+           AND role_in_team='manager'`,
+          [teamId, u.sub]
+        );
+        if (!isManager) return res.status(403).json({ error: 'forbidden' });
+      }
+
+      const { rows } = await db.query(
+        `SELECT r.id, r.worker_id, w.name, w.position, w.user_id,
+                u.login, r.status, r.created_at
+         FROM team_join_requests r
+         JOIN workers w ON w.id = r.worker_id
+         LEFT JOIN users u ON u.id = w.user_id
+         WHERE r.team_id = $1 AND r.status = 'pending'
+         ORDER BY r.created_at DESC`,
+        [teamId]
+      );
+      res.json(rows);
+    } catch (err) { next(err); }
+  }
+);
+
+router.post('/:id/join-requests/:reqId/approve',
+  validate.params(z.object({ 
+    id: z.coerce.number().int().positive(),
+    reqId: z.coerce.number().int().positive()
+  })),
+  async (req, res, next) => {
+    const client = await pool.connect();
+    try {
+      const { id: teamId, reqId } = req.params;
+      const u = req.user;
+
+      if (u.role !== 'admin') {
+        const { rowCount: isManager } = await client.query(
+          `SELECT 1 FROM team_members 
+           WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2) 
+           AND role_in_team='manager'`,
+          [teamId, u.sub]
+        );
+        if (!isManager) return res.status(403).json({ error: 'forbidden' });
+      }
+
+      await client.query('BEGIN');
+
+      const { rows: [req_] } = await client.query(
+        `SELECT id, worker_id, status FROM team_join_requests 
+         WHERE id=$1 AND team_id=$2 AND status='pending'`,
+        [reqId, teamId]
+      );
+      if (!req_) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'not_found' });
+      }
+
+      await client.query(
+        `INSERT INTO team_members (team_id, worker_id, role_in_team)
+         VALUES ($1, $2, 'member')
+         ON CONFLICT (team_id, worker_id) DO NOTHING`,
+        [teamId, req_.worker_id]
+      );
+
+      const { rows: [decidedBy] } = await client.query(
+        'SELECT id FROM workers WHERE user_id=$1',
+        [u.sub]
+      );
+
+      await client.query(
+        `UPDATE team_join_requests 
+         SET status='approved', decided_at=now(), decided_by=$1 
+         WHERE id=$2`,
+        [decidedBy?.id || null, reqId]
+      );
+
+      await client.query('COMMIT');
+      res.json({ ok: true });
+    } catch (err) {
+      await client.query('ROLLBACK');
+      next(err);
+    } finally {
+      client.release();
+    }
+  }
+);
+
+router.post('/:id/join-requests/:reqId/reject',
+  validate.params(z.object({ 
+    id: z.coerce.number().int().positive(),
+    reqId: z.coerce.number().int().positive()
+  })),
+  async (req, res, next) => {
+    try {
+      const { id: teamId, reqId } = req.params;
+      const u = req.user;
+
+      if (u.role !== 'admin') {
+        const { rowCount: isManager } = await db.query(
+          `SELECT 1 FROM team_members 
+           WHERE team_id=$1 AND worker_id=(SELECT id FROM workers WHERE user_id=$2) 
+           AND role_in_team='manager'`,
+          [teamId, u.sub]
+        );
+        if (!isManager) return res.status(403).json({ error: 'forbidden' });
+      }
+
+      const { rows: [decidedBy] } = await db.query(
+        'SELECT id FROM workers WHERE user_id=$1',
+        [u.sub]
+      );
+
+      const { rowCount } = await db.query(
+        `UPDATE team_join_requests 
+         SET status='rejected', decided_at=now(), decided_by=$1 
+         WHERE id=$2 AND team_id=$3 AND status='pending'`,
+        [decidedBy?.id || null, reqId, teamId]
+      );
+      if (!rowCount) return res.status(404).json({ error: 'not_found' });
+      res.json({ ok: true });
+    } catch (err) { next(err); }
   }
 );
